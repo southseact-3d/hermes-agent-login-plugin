@@ -1,0 +1,12 @@
+{
+  "name": "jlcpcb-auth",
+  "label": "JLCPCB Auth",
+  "version": "1.2.0",
+  "description": "Manage JLCPCB credentials securely without exposing them to the agent model.",
+  "tab": {
+    "icon": "🔐",
+    "position": "after:api-keys"
+  },
+  "backend": "backend.py",
+  "entry": "panel.js"
+}

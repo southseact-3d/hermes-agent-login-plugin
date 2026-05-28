@@ -104,9 +104,9 @@ async def get_status():
 @router.post("/credentials")
 async def save_credentials(payload: CredentialsPayload):
     username = payload.username.strip()
-    password = payload.password.strip()
+    password = payload.password
 
-    if not username or not password:
+    if not username or not password or not password.strip():
         raise HTTPException(status_code=400, detail="Username and password are required.")
 
     if "@" not in username:

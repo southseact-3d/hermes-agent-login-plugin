@@ -307,6 +307,19 @@ class TestDashboardApi(TempEnvFileMixin, unittest.TestCase):
         clear_body = self._decode(clear_response)
         self.assertTrue(clear_body["success"])
 
+    def test_save_credentials_keeps_password_whitespace(self):
+        payload = self.api.CredentialsPayload(
+            username="whitespace@example.com",
+            password="  Secret With Spaces  ",
+        )
+        save_response = asyncio.run(self.api.save_credentials(payload))
+        save_body = self._decode(save_response)
+        self.assertTrue(save_body["success"])
+
+        username, password = get_credentials()
+        self.assertEqual(username, "whitespace@example.com")
+        self.assertEqual(password, "  Secret With Spaces  ")
+
 
 if __name__ == "__main__":
     loader = unittest.TestLoader()

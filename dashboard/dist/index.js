@@ -63,10 +63,18 @@
       border-radius: var(--radius, 0.375rem);
       border: 1px solid var(--border, #334155);
       background: var(--input, rgba(15,23,42,0.8));
-      color: var(--foreground, #e2e8f0);
+      color: var(--input-foreground, var(--foreground, #0f172a));
+      -webkit-text-fill-color: var(--input-foreground, var(--foreground, #0f172a));
+      caret-color: var(--input-foreground, var(--foreground, #0f172a));
       font-size: 0.9rem;
       outline: none;
       transition: border-color 0.15s;
+      opacity: 1;
+      user-select: text;
+    }
+    .jlc-field input::placeholder {
+      color: var(--muted-foreground, #94a3b8);
+      -webkit-text-fill-color: var(--muted-foreground, #94a3b8);
     }
     .jlc-field input:focus { border-color: var(--primary, #6366f1); }
     .jlc-field .jlc-hint {
@@ -161,8 +169,10 @@
             type="email"
             id="jlc-username"
             data-el="username-input"
+            name="jlc-username"
             placeholder="you@example.com"
             autocomplete="username"
+            spellcheck="false"
           />
           <span class="jlc-hint">Your JLCPCB account email address.</span>
         </div>
@@ -173,8 +183,10 @@
             type="password"
             id="jlc-password"
             data-el="password-input"
+            name="jlc-password"
             placeholder="••••••••••••"
             autocomplete="current-password"
+            spellcheck="false"
           />
           <span class="jlc-hint">
             Write-only. Once saved, the password is never displayed here.
@@ -215,10 +227,141 @@
     );
   }
 
+  function getCookie(name) {
+    const source = typeof document !== "undefined" ? document.cookie || "" : "";
+    if (!source) {
+      return "";
+    }
+
+    const tokens = source.split(";");
+    for (let i = 0; i < tokens.length; i += 1) {
+      const part = tokens[i].trim();
+      if (part.startsWith(`${name}=`)) {
+        return decodeURIComponent(part.slice(name.length + 1));
+      }
+    }
+    return "";
+  }
+
+  function getCsrfToken() {
+    if (typeof document === "undefined") {
+      return "";
+    }
+
+    const metaNames = ["csrf-token", "csrf", "xsrf-token"];
+    for (let i = 0; i < metaNames.length; i += 1) {
+      const name = metaNames[i];
+      const meta = document.querySelector(`meta[name="${name}"]`);
+      if (meta && meta.content) {
+        return meta.content;
+      }
+    }
+
+    const cookieNames = ["csrftoken", "csrf_token", "_csrf", "XSRF-TOKEN"];
+    for (let i = 0; i < cookieNames.length; i += 1) {
+      const value = getCookie(cookieNames[i]);
+      if (value) {
+        return value;
+      }
+    }
+
+    return "";
+  }
+
+  async function parseResponse(res) {
+    const contentType = (res.headers && res.headers.get && res.headers.get("content-type")) || "";
+    if (contentType.includes("application/json")) {
+      try {
+        return await res.json();
+      } catch {
+        return {};
+      }
+    }
+
+    const text = await res.text();
+    return {
+      success: res.ok,
+      detail: text || res.statusText || "Request failed.",
+      message: text || res.statusText || "Request failed.",
+    };
+  }
+
+  async function sdkFetch(url, options) {
+    if (!SDK) {
+      return null;
+    }
+
+    const candidates = [
+      SDK.apiFetch,
+      SDK.fetch,
+      SDK.request,
+      SDK.api && SDK.api.fetch,
+      SDK.api && SDK.api.request,
+      SDK.http && SDK.http.fetch,
+      SDK.http && SDK.http.request,
+    ].filter((fn) => typeof fn === "function");
+
+    for (let i = 0; i < candidates.length; i += 1) {
+      const fn = candidates[i];
+      try {
+        const response = await fn(url, options);
+        if (response) {
+          return response;
+        }
+      } catch {
+      }
+    }
+
+    return null;
+  }
+
+  async function apiRequest(path, options) {
+    const method = (options && options.method ? options.method : "GET").toUpperCase();
+    const headers = {
+      Accept: "application/json",
+      ...(options && options.headers ? options.headers : {}),
+    };
+
+    if (options && options.body && !(options.body instanceof FormData) && !headers["Content-Type"]) {
+      headers["Content-Type"] = "application/json";
+    }
+
+    if (method !== "GET" && method !== "HEAD") {
+      const token = getCsrfToken();
+      if (token) {
+        headers["X-CSRF-Token"] = token;
+        headers["X-CSRFToken"] = token;
+        headers["X-XSRF-Token"] = token;
+      }
+    }
+
+    const requestOptions = {
+      ...(options || {}),
+      method,
+      headers,
+      credentials: "include",
+      cache: "no-store",
+    };
+
+    const url = `${API}${path}`;
+
+    let res = await sdkFetch(url, requestOptions);
+    if (!res) {
+      res = await fetch(url, requestOptions);
+    }
+
+    const data = await parseResponse(res);
+    return {
+      ok: !!res.ok,
+      status: res.status,
+      data,
+    };
+  }
+
   async function fetchStatus() {
     try {
-      const res = await fetch(`${API}/status`);
-      return await res.json();
+      const result = await apiRequest("/status");
+      return result.ok ? result.data : null;
     } catch {
       return null;
     }
@@ -274,6 +417,78 @@
     }, 6000);
   }
 
+  function insertTextAtCursor(input, text) {
+    const start = typeof input.selectionStart === "number" ? input.selectionStart : input.value.length;
+    const end = typeof input.selectionEnd === "number" ? input.selectionEnd : input.value.length;
+    const before = input.value.slice(0, start);
+    const after = input.value.slice(end);
+    input.value = `${before}${text}${after}`;
+    const cursor = start + text.length;
+    if (typeof input.setSelectionRange === "function") {
+      input.setSelectionRange(cursor, cursor);
+    }
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function attachInputGuards(input) {
+    if (!input) {
+      return;
+    }
+
+    const stopShortcutPropagation = (event) => {
+      event.stopPropagation();
+    };
+
+    input.addEventListener("keydown", (event) => {
+      stopShortcutPropagation(event);
+
+      if (!event.defaultPrevented) {
+        return;
+      }
+
+      if (event.key === "Backspace" || event.key === "Delete") {
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        if (navigator.clipboard && typeof navigator.clipboard.readText === "function") {
+          navigator.clipboard.readText().then((text) => {
+            if (text) {
+              insertTextAtCursor(input, text);
+            }
+          }).catch(() => {
+          });
+        }
+        return;
+      }
+
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key && event.key.length === 1) {
+        event.preventDefault();
+        insertTextAtCursor(input, event.key);
+      }
+    });
+
+    input.addEventListener("keypress", stopShortcutPropagation);
+    input.addEventListener("keyup", stopShortcutPropagation);
+    input.addEventListener("copy", stopShortcutPropagation);
+    input.addEventListener("cut", stopShortcutPropagation);
+
+    input.addEventListener("paste", (event) => {
+      stopShortcutPropagation(event);
+
+      if (!event.defaultPrevented) {
+        return;
+      }
+
+      event.preventDefault();
+      const text = event.clipboardData ? event.clipboardData.getData("text") : "";
+      if (text) {
+        insertTextAtCursor(input, text);
+      }
+    });
+  }
+
   function mount(container) {
     if (!container) {
       return;
@@ -290,6 +505,9 @@
     const testBtn = scoped.querySelector('[data-el="test-btn"]');
     const clearBtn = scoped.querySelector('[data-el="clear-btn"]');
 
+    attachInputGuards(usernameInput);
+    attachInputGuards(passwordInput);
+
     if (saveBtn) {
       saveBtn.addEventListener("click", async () => {
         const username = (usernameInput && usernameInput.value ? usernameInput.value : "").trim();
@@ -304,21 +522,21 @@
         saveBtn.textContent = "Saving…";
 
         try {
-          const res = await fetch(`${API}/credentials`, {
+          const result = await apiRequest("/credentials", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ username, password }),
           });
-          const data = await res.json();
 
-          if (data.success) {
-            showMsg(scoped, `✓ Credentials saved for ${data.username_hint}`, "success");
+          if (result.ok && result.data && result.data.success) {
+            showMsg(scoped, `✓ Credentials saved for ${result.data.username_hint}`, "success");
             if (usernameInput) usernameInput.value = "";
             if (passwordInput) passwordInput.value = "";
             const status = await fetchStatus();
             updateStatusCard(scoped, status);
+          } else if (result.status === 401) {
+            showMsg(scoped, "Unauthorized while saving. Refresh the dashboard and try again.", "error");
           } else {
-            showMsg(scoped, data.detail || "Failed to save credentials.", "error");
+            showMsg(scoped, result.data.detail || result.data.message || "Failed to save credentials.", "error");
           }
         } catch {
           showMsg(scoped, "Network error saving credentials.", "error");
@@ -334,9 +552,13 @@
         testBtn.disabled = true;
         testBtn.textContent = "Checking…";
         try {
-          const res = await fetch(`${API}/test`, { method: "POST" });
-          const data = await res.json();
-          showMsg(scoped, data.message, data.success ? "info" : "error");
+          const result = await apiRequest("/test", { method: "POST" });
+          const data = result.data || {};
+          if (result.status === 401) {
+            showMsg(scoped, "Unauthorized while checking status. Refresh the dashboard and try again.", "error");
+          } else {
+            showMsg(scoped, data.message || "Status check completed.", data.success ? "info" : "error");
+          }
           const status = await fetchStatus();
           updateStatusCard(scoped, status);
         } catch {
@@ -355,9 +577,13 @@
         }
 
         try {
-          const res = await fetch(`${API}/clear`, { method: "POST" });
-          const data = await res.json();
-          showMsg(scoped, data.message, "info");
+          const result = await apiRequest("/clear", { method: "POST" });
+          const data = result.data || {};
+          if (result.status === 401) {
+            showMsg(scoped, "Unauthorized while clearing credentials. Refresh the dashboard and try again.", "error");
+          } else {
+            showMsg(scoped, data.message || "Credentials cleared.", "info");
+          }
           const status = await fetchStatus();
           updateStatusCard(scoped, status);
         } catch {

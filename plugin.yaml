@@ -1,0 +1,30 @@
+name: jlcpcb-auth
+version: 1.2.0
+description: >
+  Secure JLCPCB authentication plugin.
+  Logs the agent into passport.jlcpcb.com without ever exposing credentials
+  to the model's context window.  Credentials are read exclusively from env
+  vars injected at container start.  Adds a dashboard tab for credential
+  management.
+author: Liam / modelrailway3d.co.uk
+
+provides_tools:
+  - jlcpcb_login
+  - jlcpcb_logout
+  - jlcpcb_auth_status
+
+provides_hooks:
+  - post_tool_call          # redacts credential leaks in tool output
+
+# Hermes will prompt for these during `hermes plugins install` and write them
+# to ~/.hermes/.env  (or your secrets.env injected via Docker).
+# If either is missing the plugin is disabled with a clear diagnostic.
+requires_env:
+  - name: JLCPCB_USERNAME
+    description: "JLCPCB account email address"
+    url: "https://passport.jlcpcb.com/#/login"
+    secret: false
+  - name: JLCPCB_PASSWORD
+    description: "JLCPCB account password"
+    url: "https://passport.jlcpcb.com/#/login"
+    secret: true

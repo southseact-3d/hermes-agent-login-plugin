@@ -2,7 +2,7 @@
 tools.py — Tool handlers for the JLCPCB auth plugin.
 
 Security contract:
-  - Credentials are ONLY read from os.environ inside this file.
+  - Credentials are accessed only via credentials.py.
   - Credentials are NEVER returned in any tool result.
   - Credentials are NEVER logged (the post_tool_call hook in hooks.py
     redacts any accidental leaks as a belt-and-braces measure).
@@ -24,9 +24,13 @@ JLCPCB login flow notes (as of 2025/2026):
 """
 
 import json
-import os
 import time
 from typing import Any
+
+try:
+    from .credentials import credentials_available, get_credentials, username_hint
+except ImportError:
+    from credentials import credentials_available, get_credentials, username_hint
 
 # ---------------------------------------------------------------------------
 # Module-level session state
@@ -43,28 +47,13 @@ _session: dict[str, Any] = {
 SESSION_MAX_AGE = 3600  # 1 hour
 
 
-def _username_hint() -> str:
-    """Return a redacted hint for diagnostics — never the full value."""
-    raw = os.environ.get("JLCPCB_USERNAME", "")
-    if len(raw) <= 3:
-        return "***"
-    return raw[:3] + "***"
-
-
-def _credentials_available() -> bool:
-    return bool(
-        os.environ.get("JLCPCB_USERNAME", "").strip()
-        and os.environ.get("JLCPCB_PASSWORD", "").strip()
-    )
-
-
 # ---------------------------------------------------------------------------
 # jlcpcb_auth_status
 # ---------------------------------------------------------------------------
 
 def jlcpcb_auth_status(args: dict, ctx=None, **kwargs) -> str:
     """Return the current auth state without touching the browser."""
-    if not _credentials_available():
+    if not credentials_available():
         return json.dumps({
             "logged_in": False,
             "error": "Credentials not configured. Set JLCPCB_USERNAME and JLCPCB_PASSWORD.",
@@ -81,7 +70,7 @@ def jlcpcb_auth_status(args: dict, ctx=None, **kwargs) -> str:
     return json.dumps({
         "logged_in": _session["logged_in"],
         "session_age_seconds": age,
-        "account_hint": _username_hint() if _session["logged_in"] else None,
+        "account_hint": username_hint() if _session["logged_in"] else None,
     })
 
 
@@ -96,11 +85,11 @@ def jlcpcb_login(args: dict, ctx=None, **kwargs) -> str:
     Uses ctx.run_browser_task() — the canonical Hermes plugin API for
     driving the built-in browser without exposing credentials to the model.
 
-    The browser task receives credentials via a closure over os.environ;
+    The browser task receives credentials from the credential service;
     they are injected directly into browser_type() calls and never
     appear in the task description string that the model might see.
     """
-    if not _credentials_available():
+    if not credentials_available():
         return json.dumps({
             "status": "error",
             "message": (
@@ -122,8 +111,12 @@ def jlcpcb_login(args: dict, ctx=None, **kwargs) -> str:
     # Read credentials NOW into local variables — they exist only in this
     # stack frame and are passed directly to browser actions.
     # They are never serialised, returned, or logged.
-    username = os.environ["JLCPCB_USERNAME"].strip()
-    password = os.environ["JLCPCB_PASSWORD"].strip()
+    username, password = get_credentials()
+    if not username or not password:
+        return json.dumps({
+            "status": "error",
+            "message": "JLCPCB credentials are not configured.",
+        })
 
     try:
         result = _do_login(ctx, username, password)
@@ -267,7 +260,7 @@ def _do_login(ctx, username: str, password: str) -> str:
     if success:
         _session["logged_in"] = True
         _session["logged_in_at"] = time.time()
-        _session["username_hint"] = _username_hint()
+        _session["username_hint"] = username_hint()
         return json.dumps({"status": "logged_in"})
 
     # Check for an error message on the page
@@ -434,8 +427,7 @@ def _extract_error_text(snapshot: str) -> str | None:
 
 def _sanitise_error(msg: str) -> str:
     """Belt-and-braces: remove credential values from any error string."""
-    username = os.environ.get("JLCPCB_USERNAME", "")
-    password = os.environ.get("JLCPCB_PASSWORD", "")
+    username, password = get_credentials()
     if username and username in msg:
         msg = msg.replace(username, "***")
     if password and password in msg:

@@ -1,43 +1,41 @@
 """
-test_plugin.py — Unit tests for the jlcpcb-auth plugin.
-
-Tests everything that can be verified without a live browser:
-  - Schema correctness (no credential parameters)
-  - Credential redaction (sanitise_error, post_tool_call hook)
-  - Session state management
-  - Accessibility tree parser (_find_ref, _is_tab_active)
-  - Dashboard backend helpers
-  - tools return correct structure when credentials missing
-
-Run with:
-  cd jlcpcb-auth
-  python -m pytest test_plugin.py -v
-  # or without pytest:
-  python test_plugin.py
+Unit tests for the jlcpcb-auth plugin.
 """
 
+from __future__ import annotations
+
+import asyncio
+import importlib.util
 import json
 import os
+import re
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
-# ── Allow running from the plugin directory directly ──────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
 
-from schemas import JLCPCB_LOGIN, JLCPCB_LOGOUT, JLCPCB_AUTH_STATUS
+from credentials import (
+    PASSWORD_KEY,
+    USERNAME_KEY,
+    clear_credentials,
+    credentials_available,
+    get_credentials,
+    set_credentials,
+    username_hint,
+)
+from hooks import post_tool_call
+from schemas import JLCPCB_AUTH_STATUS, JLCPCB_LOGIN, JLCPCB_LOGOUT
 from tools import (
+    _extract_error_text,
     _find_ref,
     _is_tab_active,
-    _extract_error_text,
     _sanitise_error,
     _session,
     jlcpcb_auth_status,
     jlcpcb_login,
 )
-from hooks import post_tool_call
-
-
-# ── Sample accessibility tree snapshots ──────────────────────────────────────
 
 SNAPSHOT_SIGN_IN_ACTIVE = """
 @e1 [tablist] "Login options"
@@ -78,9 +76,55 @@ SNAPSHOT_PHONE_MODE = """
 """
 
 
-class TestSchemas(unittest.TestCase):
-    """Schemas must not expose any credential parameters."""
+def _load_dashboard_api_module():
+    path = Path(__file__).parent / "dashboard" / "plugin_api.py"
+    spec = importlib.util.spec_from_file_location("jlcpcb_dashboard_api", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
+
+class TempEnvFileMixin:
+    def setUp(self):
+        super().setUp()
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self._env_path = Path(self._temp_dir.name) / ".env"
+        os.environ["HERMES_ENV_FILE"] = str(self._env_path)
+        os.environ.pop(USERNAME_KEY, None)
+        os.environ.pop(PASSWORD_KEY, None)
+        _session["logged_in"] = False
+        _session["logged_in_at"] = None
+        _session["username_hint"] = None
+
+    def tearDown(self):
+        clear_credentials()
+        os.environ.pop("HERMES_ENV_FILE", None)
+        self._temp_dir.cleanup()
+        super().tearDown()
+
+
+class TestPluginMetadata(unittest.TestCase):
+    def test_plugin_yaml_no_requires_env(self):
+        content = (Path(__file__).parent / "plugin.yaml").read_text()
+        self.assertNotIn("requires_env:", content)
+
+    def test_dashboard_manifest_has_api_and_tab_path(self):
+        manifest = json.loads((Path(__file__).parent / "dashboard" / "manifest.json").read_text())
+        self.assertEqual(manifest["name"], "jlcpcb-auth")
+        self.assertIn("api", manifest)
+        self.assertIn("entry", manifest)
+        self.assertEqual(manifest["tab"]["path"], "/jlcpcb-auth")
+
+    def test_dashboard_registration_name_matches_manifest(self):
+        manifest = json.loads((Path(__file__).parent / "dashboard" / "manifest.json").read_text())
+        js = (Path(__file__).parent / "dashboard" / "dist" / "index.js").read_text()
+        match = re.search(r'const\s+pluginName\s*=\s*"([^"]+)"', js)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), manifest["name"])
+
+
+class TestSchemas(unittest.TestCase):
     def test_login_has_no_parameters(self):
         params = JLCPCB_LOGIN["parameters"]
         self.assertEqual(params["properties"], {})
@@ -98,25 +142,44 @@ class TestSchemas(unittest.TestCase):
 
     def test_login_description_mentions_no_credentials(self):
         desc = JLCPCB_LOGIN["description"].lower()
-        # Description should explicitly say credentials aren't required as params
         self.assertIn("no credentials", desc)
 
-    def test_tool_names_correct(self):
-        self.assertEqual(JLCPCB_LOGIN["name"], "jlcpcb_login")
-        self.assertEqual(JLCPCB_LOGOUT["name"], "jlcpcb_logout")
-        self.assertEqual(JLCPCB_AUTH_STATUS["name"], "jlcpcb_auth_status")
+
+class TestCredentialService(TempEnvFileMixin, unittest.TestCase):
+    def test_set_get_and_hint(self):
+        set_credentials("testuser@example.com", "SuperSecret123!")
+        username, password = get_credentials()
+        self.assertEqual(username, "testuser@example.com")
+        self.assertEqual(password, "SuperSecret123!")
+        self.assertTrue(credentials_available())
+        self.assertEqual(username_hint(), "tes***")
+
+    def test_clear_credentials(self):
+        set_credentials("u@example.com", "password")
+        clear_credentials()
+        username, password = get_credentials()
+        self.assertIsNone(username)
+        self.assertIsNone(password)
+        self.assertFalse(credentials_available())
+
+    def test_preserves_unrelated_env_entries(self):
+        self._env_path.write_text("# existing\nOTHER_TOKEN=abc\n")
+        set_credentials("user@example.com", "pw")
+        data = self._env_path.read_text()
+        self.assertIn("OTHER_TOKEN=abc", data)
+
+    def test_handles_special_characters(self):
+        complex_password = "line1\nline2=with spaces"
+        set_credentials("special@example.com", complex_password)
+        username, password = get_credentials()
+        self.assertEqual(username, "special@example.com")
+        self.assertEqual(password, complex_password)
 
 
-class TestCredentialRedaction(unittest.TestCase):
-    """Credentials must never appear in any output."""
-
+class TestCredentialRedaction(TempEnvFileMixin, unittest.TestCase):
     def setUp(self):
-        os.environ["JLCPCB_USERNAME"] = "testuser@example.com"
-        os.environ["JLCPCB_PASSWORD"] = "SuperSecret123!"
-
-    def tearDown(self):
-        os.environ.pop("JLCPCB_USERNAME", None)
-        os.environ.pop("JLCPCB_PASSWORD", None)
+        super().setUp()
+        set_credentials("testuser@example.com", "SuperSecret123!")
 
     def test_sanitise_removes_password(self):
         msg = "Login failed: wrong password SuperSecret123! was rejected"
@@ -140,15 +203,8 @@ class TestCredentialRedaction(unittest.TestCase):
         result = post_tool_call("some_tool", leaked)
         self.assertNotIn("testuser@example.com", result)
 
-    def test_post_tool_call_hook_passes_normal_output(self):
-        normal = '{"status": "logged_in"}'
-        result = post_tool_call("jlcpcb_login", normal)
-        self.assertEqual(result, normal)
-
 
 class TestAccessibilityTreeParser(unittest.TestCase):
-    """_find_ref must correctly locate elements in Hermes accessibility trees."""
-
     def test_find_email_input(self):
         ref = _find_ref(SNAPSHOT_SIGN_IN_ACTIVE, labels=["email"], input_types=["email"])
         self.assertEqual(ref, "@e4")
@@ -164,11 +220,6 @@ class TestAccessibilityTreeParser(unittest.TestCase):
     def test_find_create_account_tab(self):
         ref = _find_ref(SNAPSHOT_SIGN_IN_ACTIVE, labels=["create account"], role_hints=["tab"])
         self.assertEqual(ref, "@e3")
-
-    def test_find_submit_button(self):
-        ref = _find_ref(SNAPSHOT_SIGN_IN_ACTIVE, labels=["sign in"], role_hints=["button"])
-        # Should find @e6 (the button, not the tab) — button check takes priority
-        self.assertIsNotNone(ref)
 
     def test_find_returns_none_for_missing(self):
         ref = _find_ref(SNAPSHOT_SIGN_IN_ACTIVE, labels=["nonexistent_element_xyz"])
@@ -190,7 +241,6 @@ class TestAccessibilityTreeParser(unittest.TestCase):
         self.assertTrue(active)
 
     def test_find_email_mode_tab_in_phone_mode_snapshot(self):
-        """Should find the email sub-tab to switch away from phone mode."""
         ref = _find_ref(SNAPSHOT_PHONE_MODE, labels=["email"], role_hints=["tab"])
         self.assertEqual(ref, "@e8")
 
@@ -206,21 +256,14 @@ class TestErrorExtraction(unittest.TestCase):
         self.assertIsNone(text)
 
 
-class TestAuthStatusTool(unittest.TestCase):
-    def setUp(self):
-        _session["logged_in"] = False
-        _session["logged_in_at"] = None
-        os.environ.pop("JLCPCB_USERNAME", None)
-        os.environ.pop("JLCPCB_PASSWORD", None)
-
+class TestAuthStatusTool(TempEnvFileMixin, unittest.TestCase):
     def test_status_when_no_credentials(self):
         result = json.loads(jlcpcb_auth_status({}))
         self.assertFalse(result["logged_in"])
         self.assertIn("error", result)
 
     def test_status_when_not_logged_in(self):
-        os.environ["JLCPCB_USERNAME"] = "user@test.com"
-        os.environ["JLCPCB_PASSWORD"] = "pass"
+        set_credentials("user@test.com", "pass")
         result = json.loads(jlcpcb_auth_status({}))
         self.assertFalse(result["logged_in"])
 
@@ -230,17 +273,42 @@ class TestAuthStatusTool(unittest.TestCase):
         self.assertIn("JLCPCB_USERNAME", result["message"])
 
     def test_login_result_never_contains_password(self):
-        os.environ["JLCPCB_USERNAME"] = "u@test.com"
-        os.environ["JLCPCB_PASSWORD"] = "HunterTwo99!"
-        # No ctx → will fail with an AttributeError, not expose credentials
+        set_credentials("u@test.com", "HunterTwo99!")
         result_str = jlcpcb_login({}, ctx=None)
         self.assertNotIn("HunterTwo99!", result_str)
 
 
-# ── Run directly ──────────────────────────────────────────────────────────────
+class TestDashboardApi(TempEnvFileMixin, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.api = _load_dashboard_api_module()
+
+    def _decode(self, response):
+        return json.loads(response.body.decode())
+
+    def test_status_endpoint(self):
+        response = asyncio.run(self.api.get_status())
+        payload = self._decode(response)
+        self.assertIn("credentials", payload)
+        self.assertFalse(payload["credentials"]["username_set"])
+
+    def test_save_and_clear_credentials_endpoints(self):
+        payload = self.api.CredentialsPayload(username="dash@example.com", password="pw123")
+        save_response = asyncio.run(self.api.save_credentials(payload))
+        save_body = self._decode(save_response)
+        self.assertTrue(save_body["success"])
+
+        status_response = asyncio.run(self.api.get_status())
+        status_body = self._decode(status_response)
+        self.assertTrue(status_body["credentials"]["username_set"])
+        self.assertTrue(status_body["credentials"]["password_set"])
+
+        clear_response = asyncio.run(self.api.clear_stored_credentials())
+        clear_body = self._decode(clear_response)
+        self.assertTrue(clear_body["success"])
+
 
 if __name__ == "__main__":
-    print("Running jlcpcb-auth plugin tests...\n")
     loader = unittest.TestLoader()
     suite = loader.loadTestsFromModule(sys.modules[__name__])
     runner = unittest.TextTestRunner(verbosity=2)

@@ -9,7 +9,10 @@ post_tool_call: Belt-and-braces credential redaction.
   never passed as parameters or returned in results by design.
 """
 
-import os
+try:
+    from .credentials import get_credentials
+except ImportError:
+    from credentials import get_credentials
 
 
 def post_tool_call(tool_name: str, result: str, ctx=None, **kwargs) -> str:
@@ -18,8 +21,9 @@ def post_tool_call(tool_name: str, result: str, ctx=None, **kwargs) -> str:
     Called by Hermes after every tool execution, for every tool
     (not just our own — belt-and-braces).
     """
-    username = os.environ.get("JLCPCB_USERNAME", "")
-    password = os.environ.get("JLCPCB_PASSWORD", "")
+    username, password = get_credentials()
+    username = username or ""
+    password = password or ""
 
     if not result:
         return result

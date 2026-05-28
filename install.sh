@@ -1,14 +1,5 @@
 #!/usr/bin/env bash
 # install.sh — Install the jlcpcb-auth plugin into ~/.hermes/plugins/
-#
-# Usage:
-#   chmod +x install.sh && ./install.sh
-#
-# What it does:
-#   1. Copies the plugin directory to ~/.hermes/plugins/jlcpcb-auth/
-#   2. Optionally prompts for credentials and writes them to ~/.hermes/.env
-#   3. Sets correct permissions on the .env file (chmod 600)
-#   4. Prints next steps
 
 set -e
 
@@ -20,21 +11,18 @@ echo ""
 echo "=== JLCPCB Auth Plugin Installer ==="
 echo ""
 
-# ── Copy plugin files ─────────────────────────────────────────────────────────
 mkdir -p "$PLUGIN_DIR"
-cp -r "$SCRIPT_DIR"/. "$PLUGIN_DIR/"
+cp -r "$SCRIPT_DIR"/. "$PLUGIN_DIR"/
 echo "✓ Plugin files copied to $PLUGIN_DIR"
 
-# ── Create .hermes directory and .env if needed ───────────────────────────────
 mkdir -p "$HOME/.hermes"
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 echo "✓ ~/.hermes/.env is present and chmod 600"
 
-# ── Optional: prompt for credentials ─────────────────────────────────────────
 echo ""
 echo "Would you like to set JLCPCB credentials now?"
-echo "  (You can also do this later via the Hermes dashboard → JLCPCB Auth tab)"
+echo "  (You can also do this later via Hermes dashboard → JLCPCB Auth tab)"
 echo ""
 read -r -p "Set credentials now? [y/N] " REPLY
 
@@ -47,13 +35,12 @@ if [[ "$REPLY" =~ ^[Yy]$ ]]; then
     if [[ -z "$JLC_USER" || -z "$JLC_PASS" ]]; then
         echo "  ⚠ Skipped — one or both values were empty."
     else
-        # Remove any existing entries then append
-        TMPFILE=$(mktemp)
-        grep -v "^JLCPCB_USERNAME=" "$ENV_FILE" | grep -v "^JLCPCB_PASSWORD=" > "$TMPFILE" || true
-        echo "JLCPCB_USERNAME=$JLC_USER" >> "$TMPFILE"
-        echo "JLCPCB_PASSWORD=$JLC_PASS" >> "$TMPFILE"
-        mv "$TMPFILE" "$ENV_FILE"
-        chmod 600 "$ENV_FILE"
+        JLC_USER="$JLC_USER" JLC_PASS="$JLC_PASS" PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
+import os
+from credentials import set_credentials
+
+set_credentials(os.environ["JLC_USER"], os.environ["JLC_PASS"])
+PY
         echo "  ✓ Credentials written to $ENV_FILE"
     fi
 fi
@@ -62,7 +49,7 @@ echo ""
 echo "=== Installation complete ==="
 echo ""
 echo "Next steps:"
-echo "  1. Restart Hermes (so it picks up the new plugin and .env values):"
+echo "  1. Restart Hermes once to load the new plugin:"
 echo "       docker compose restart   # if running in Docker"
 echo "       hermes restart           # if running standalone"
 echo ""
@@ -70,10 +57,10 @@ echo "  2. Verify the plugin loaded:"
 echo "       hermes plugins list"
 echo "     You should see: jlcpcb-auth  [enabled]"
 echo ""
-echo "  3. Test in the Hermes dashboard:"
+echo "  3. Open Hermes dashboard and set/update credentials anytime:"
 echo "       hermes dashboard"
-echo "     Navigate to the 🔐 JLCPCB Auth tab."
+echo "     Navigate to the JLCPCB Auth tab."
 echo ""
-echo "  4. Or test via agent chat:"
+echo "  4. Test via agent chat:"
 echo "       > Test my JLCPCB login"
 echo ""

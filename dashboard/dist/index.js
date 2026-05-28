@@ -1,25 +1,14 @@
-/**
- * panel.js — JLCPCB Auth dashboard panel
- *
- * Renders a credentials management UI in the Hermes dashboard.
- * Uses the Hermes Plugin SDK (window.HermesPlugin) for tab registration
- * and API calls to the backend routes at /api/plugins/jlcpcb-auth/
- *
- * Design principles:
- *  - Password field is write-only — never displayed back to the user
- *  - Username shows only a redacted hint after saving
- *  - All API calls are to the local dashboard server (localhost)
- *  - No credentials are ever sent to or stored by the model
- */
-
 (function () {
   "use strict";
 
+  const pluginName = "jlcpcb-auth";
   const API = "/api/plugins/jlcpcb-auth";
 
-  // --------------------------------------------------------------------------
-  // Styles
-  // --------------------------------------------------------------------------
+  const registry = window.__HERMES_PLUGINS__;
+  const SDK = window.__HERMES_PLUGIN_SDK__;
+  const React = (SDK && SDK.React) || window.React;
+  const hooks = (SDK && SDK.hooks) || React;
+
   const STYLES = `
     .jlc-panel {
       max-width: 560px;
@@ -136,9 +125,6 @@
     .jlc-security-note strong { color: var(--foreground, #e2e8f0); }
   `;
 
-  // --------------------------------------------------------------------------
-  // HTML template
-  // --------------------------------------------------------------------------
   const TEMPLATE = `
     <style>${STYLES}</style>
     <div class="jlc-panel">
@@ -149,22 +135,22 @@
         and are <strong>never</strong> visible to the AI model.
       </p>
 
-      <div class="jlc-status-card" id="jlc-status-card">
+      <div class="jlc-status-card" data-el="status-card">
         <div class="jlc-stat">
           <span class="jlc-stat-label">Username</span>
-          <span class="jlc-stat-value" id="jlc-username-status">—</span>
+          <span class="jlc-stat-value" data-el="username-status">—</span>
         </div>
         <div class="jlc-stat">
           <span class="jlc-stat-label">Password</span>
-          <span class="jlc-stat-value" id="jlc-password-status">—</span>
+          <span class="jlc-stat-value" data-el="password-status">—</span>
         </div>
         <div class="jlc-stat">
           <span class="jlc-stat-label">Session</span>
-          <span class="jlc-stat-value" id="jlc-session-status">—</span>
+          <span class="jlc-stat-value" data-el="session-status">—</span>
         </div>
         <div class="jlc-stat">
           <span class="jlc-stat-label">Env file</span>
-          <span class="jlc-stat-value" id="jlc-envfile-status">—</span>
+          <span class="jlc-stat-value" data-el="envfile-status">—</span>
         </div>
       </div>
 
@@ -174,6 +160,7 @@
           <input
             type="email"
             id="jlc-username"
+            data-el="username-input"
             placeholder="you@example.com"
             autocomplete="username"
           />
@@ -185,6 +172,7 @@
           <input
             type="password"
             id="jlc-password"
+            data-el="password-input"
             placeholder="••••••••••••"
             autocomplete="current-password"
           />
@@ -195,18 +183,18 @@
         </div>
 
         <div class="jlc-actions">
-          <button class="jlc-btn jlc-btn-primary" id="jlc-save-btn">
+          <button class="jlc-btn jlc-btn-primary" data-el="save-btn">
             Save Credentials
           </button>
-          <button class="jlc-btn jlc-btn-ghost" id="jlc-test-btn">
+          <button class="jlc-btn jlc-btn-ghost" data-el="test-btn">
             Check Status
           </button>
-          <button class="jlc-btn jlc-btn-danger" id="jlc-clear-btn">
+          <button class="jlc-btn jlc-btn-danger" data-el="clear-btn">
             Clear Credentials
           </button>
         </div>
 
-        <div class="jlc-msg" id="jlc-msg"></div>
+        <div class="jlc-msg" data-el="msg"></div>
       </div>
 
       <hr class="jlc-divider" />
@@ -214,18 +202,18 @@
       <div class="jlc-security-note">
         <strong>Security model:</strong>
         Credentials are stored in <code>~/.hermes/.env</code> (chmod 600) and
-        injected into the Hermes process at startup via environment variables.
-        The AI model only sees a tool called <code>jlcpcb_login()</code> with
-        no parameters — it can trigger a login but <strong>never sees your
-        username or password</strong>. A post-tool-call hook redacts any
-        accidental leaks before results reach the model context.
+        loaded by plugin tools at runtime. The AI model only sees
+        <code>jlcpcb_login()</code> with no parameters and never receives the
+        raw credential values.
       </div>
     </div>
   `;
 
-  // --------------------------------------------------------------------------
-  // Panel logic
-  // --------------------------------------------------------------------------
+  function escapeHtml(str) {
+    return (str || "").replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+    );
+  }
 
   async function fetchStatus() {
     try {
@@ -236,155 +224,167 @@
     }
   }
 
-  function updateStatusCard(data) {
-    if (!data) return;
+  function updateStatusCard(root, data) {
+    if (!data || !root) {
+      return;
+    }
 
     const { credentials, session, env_file_exists } = data;
 
-    const usernameEl = document.getElementById("jlc-username-status");
-    const passwordEl = document.getElementById("jlc-password-status");
-    const sessionEl  = document.getElementById("jlc-session-status");
-    const envEl      = document.getElementById("jlc-envfile-status");
+    const usernameEl = root.querySelector('[data-el="username-status"]');
+    const passwordEl = root.querySelector('[data-el="password-status"]');
+    const sessionEl = root.querySelector('[data-el="session-status"]');
+    const envEl = root.querySelector('[data-el="envfile-status"]');
 
     if (usernameEl) {
       usernameEl.innerHTML = credentials.username_set
         ? `<span class="badge-ok">✓ ${escapeHtml(credentials.username_hint)}</span>`
-        : `<span class="badge-missing">✗ Not set</span>`;
+        : '<span class="badge-missing">✗ Not set</span>';
     }
     if (passwordEl) {
       passwordEl.innerHTML = credentials.password_set
-        ? `<span class="badge-ok">✓ Set</span>`
-        : `<span class="badge-missing">✗ Not set</span>`;
+        ? '<span class="badge-ok">✓ Set</span>'
+        : '<span class="badge-missing">✗ Not set</span>';
     }
     if (sessionEl) {
       if (session.logged_in) {
-        const mins = session.session_age_seconds
-          ? Math.floor(session.session_age_seconds / 60)
-          : 0;
+        const mins = session.session_age_seconds ? Math.floor(session.session_age_seconds / 60) : 0;
         sessionEl.innerHTML = `<span class="badge-ok">✓ Active (${mins}m ago)</span>`;
       } else {
-        sessionEl.innerHTML = `<span class="badge-warn">Not logged in</span>`;
+        sessionEl.innerHTML = '<span class="badge-warn">Not logged in</span>';
       }
     }
     if (envEl) {
       envEl.innerHTML = env_file_exists
-        ? `<span class="badge-ok">✓ ~/.hermes/.env</span>`
-        : `<span class="badge-warn">Not yet created</span>`;
+        ? '<span class="badge-ok">✓ ~/.hermes/.env</span>'
+        : '<span class="badge-warn">Not yet created</span>';
     }
   }
 
-  function showMsg(text, type = "info") {
-    const el = document.getElementById("jlc-msg");
-    if (!el) return;
+  function showMsg(root, text, type) {
+    const el = root && root.querySelector('[data-el="msg"]');
+    if (!el) {
+      return;
+    }
+
     el.textContent = text;
-    el.className = `jlc-msg show ${type}`;
-    setTimeout(() => el.classList.remove("show"), 6000);
+    el.className = `jlc-msg show ${type || "info"}`;
+    setTimeout(() => {
+      el.classList.remove("show");
+    }, 6000);
   }
-
-  function escapeHtml(str) {
-    return str.replace(/[&<>"']/g, (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
-    );
-  }
-
-  // --------------------------------------------------------------------------
-  // Mount the panel
-  // --------------------------------------------------------------------------
 
   function mount(container) {
+    if (!container) {
+      return;
+    }
+
     container.innerHTML = TEMPLATE;
+    const scoped = container.querySelector(".jlc-panel") || container;
 
-    // Load initial status
-    fetchStatus().then(updateStatusCard);
+    fetchStatus().then((data) => updateStatusCard(scoped, data));
 
-    // Save button
-    document.getElementById("jlc-save-btn").addEventListener("click", async () => {
-      const username = document.getElementById("jlc-username").value.trim();
-      const password = document.getElementById("jlc-password").value;
+    const usernameInput = scoped.querySelector('[data-el="username-input"]');
+    const passwordInput = scoped.querySelector('[data-el="password-input"]');
+    const saveBtn = scoped.querySelector('[data-el="save-btn"]');
+    const testBtn = scoped.querySelector('[data-el="test-btn"]');
+    const clearBtn = scoped.querySelector('[data-el="clear-btn"]');
 
-      if (!username || !password) {
-        showMsg("Please enter both username and password.", "error");
-        return;
-      }
+    if (saveBtn) {
+      saveBtn.addEventListener("click", async () => {
+        const username = (usernameInput && usernameInput.value ? usernameInput.value : "").trim();
+        const password = passwordInput && passwordInput.value ? passwordInput.value : "";
 
-      const btn = document.getElementById("jlc-save-btn");
-      btn.disabled = true;
-      btn.textContent = "Saving…";
-
-      try {
-        const res = await fetch(`${API}/credentials`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username, password }),
-        });
-        const data = await res.json();
-
-        if (data.success) {
-          showMsg(`✓ Credentials saved for ${data.username_hint}`, "success");
-          document.getElementById("jlc-username").value = "";
-          document.getElementById("jlc-password").value = "";
-          const status = await fetchStatus();
-          updateStatusCard(status);
-        } else {
-          showMsg(data.detail || "Failed to save credentials.", "error");
+        if (!username || !password) {
+          showMsg(scoped, "Please enter both username and password.", "error");
+          return;
         }
-      } catch (e) {
-        showMsg("Network error saving credentials.", "error");
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Save Credentials";
-      }
-    });
 
-    // Test / refresh status button
-    document.getElementById("jlc-test-btn").addEventListener("click", async () => {
-      const btn = document.getElementById("jlc-test-btn");
-      btn.disabled = true;
-      btn.textContent = "Checking…";
-      try {
-        const res = await fetch(`${API}/test`, { method: "POST" });
-        const data = await res.json();
-        showMsg(data.message, data.success ? "info" : "error");
-        const status = await fetchStatus();
-        updateStatusCard(status);
-      } catch {
-        showMsg("Could not reach backend.", "error");
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Check Status";
-      }
-    });
+        saveBtn.disabled = true;
+        saveBtn.textContent = "Saving…";
 
-    // Clear button
-    document.getElementById("jlc-clear-btn").addEventListener("click", async () => {
-      if (!confirm("Clear stored JLCPCB credentials? The agent will not be able to log in until new credentials are set.")) return;
-      try {
-        const res = await fetch(`${API}/clear`, { method: "POST" });
-        const data = await res.json();
-        showMsg(data.message, "info");
-        const status = await fetchStatus();
-        updateStatusCard(status);
-      } catch {
-        showMsg("Could not clear credentials.", "error");
-      }
-    });
+        try {
+          const res = await fetch(`${API}/credentials`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+          });
+          const data = await res.json();
+
+          if (data.success) {
+            showMsg(scoped, `✓ Credentials saved for ${data.username_hint}`, "success");
+            if (usernameInput) usernameInput.value = "";
+            if (passwordInput) passwordInput.value = "";
+            const status = await fetchStatus();
+            updateStatusCard(scoped, status);
+          } else {
+            showMsg(scoped, data.detail || "Failed to save credentials.", "error");
+          }
+        } catch {
+          showMsg(scoped, "Network error saving credentials.", "error");
+        } finally {
+          saveBtn.disabled = false;
+          saveBtn.textContent = "Save Credentials";
+        }
+      });
+    }
+
+    if (testBtn) {
+      testBtn.addEventListener("click", async () => {
+        testBtn.disabled = true;
+        testBtn.textContent = "Checking…";
+        try {
+          const res = await fetch(`${API}/test`, { method: "POST" });
+          const data = await res.json();
+          showMsg(scoped, data.message, data.success ? "info" : "error");
+          const status = await fetchStatus();
+          updateStatusCard(scoped, status);
+        } catch {
+          showMsg(scoped, "Could not reach backend.", "error");
+        } finally {
+          testBtn.disabled = false;
+          testBtn.textContent = "Check Status";
+        }
+      });
+    }
+
+    if (clearBtn) {
+      clearBtn.addEventListener("click", async () => {
+        if (!window.confirm("Clear stored JLCPCB credentials? The agent will not be able to log in until new credentials are set.")) {
+          return;
+        }
+
+        try {
+          const res = await fetch(`${API}/clear`, { method: "POST" });
+          const data = await res.json();
+          showMsg(scoped, data.message, "info");
+          const status = await fetchStatus();
+          updateStatusCard(scoped, status);
+        } catch {
+          showMsg(scoped, "Could not clear credentials.", "error");
+        }
+      });
+    }
   }
 
-  // --------------------------------------------------------------------------
-  // Register with Hermes Plugin SDK
-  // --------------------------------------------------------------------------
-  if (window.HermesPlugin) {
-    window.HermesPlugin.registerTab({
-      id: "jlcpcb-auth",
-      label: "JLCPCB Auth",
-      icon: "🔐",
-      mount,
-    });
-  } else {
-    // Fallback: auto-mount if SDK not present (standalone testing)
-    document.addEventListener("DOMContentLoaded", () => {
-      const root = document.getElementById("jlcpcb-auth-root") || document.body;
-      mount(root);
-    });
+  if (registry && React && hooks) {
+    const useEffect = hooks.useEffect;
+    const useRef = hooks.useRef;
+
+    function JlcpcbAuthPanel() {
+      const rootRef = useRef(null);
+      useEffect(() => {
+        mount(rootRef.current);
+      }, []);
+      return React.createElement("div", { ref: rootRef });
+    }
+
+    registry.register(pluginName, JlcpcbAuthPanel);
+    return;
   }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const root = document.getElementById("jlcpcb-auth-root") || document.body;
+    mount(root);
+  });
 })();
